@@ -15,4 +15,6 @@ ln -s /Applications "$STAGING/Applications"
 
 rm -f "$DMG"
 hdiutil create -volname "StickyTop $VERSION" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
-echo "==> Built $DMG"
+# A version-less copy for the README's one-click link (releases/latest/download/StickyTop.dmg).
+cp "$DMG" dist/StickyTop.dmg
+echo "==> Built $DMG (+ dist/StickyTop.dmg for the latest-download link)"

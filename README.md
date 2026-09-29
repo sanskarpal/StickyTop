@@ -4,6 +4,14 @@ Sticky notes for macOS that **never leave the screen — and never get in the wa
 
 ![StickyTop notes](docs/preview.png)
 
+## Download
+
+[![Download StickyTop for Mac](https://img.shields.io/badge/Download-StickyTop_for_Mac-2B2F77?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/sanskarpal/StickyTop/releases/latest/download/StickyTop.dmg)
+
+**[⬇︎ Download the latest StickyTop.dmg](https://github.com/sanskarpal/StickyTop/releases/latest/download/StickyTop.dmg)**. Free, macOS 13 or later, Apple silicon and Intel.
+
+Open the DMG and drag **StickyTop** to **Applications**. This build isn't notarized, so the first time you open it macOS blocks it: go to **System Settings → Privacy & Security** and click **Open Anyway**. You only do this once. All versions are on the [Releases](https://github.com/sanskarpal/StickyTop/releases) page. To build it yourself, see [Install](#install).
+
 ## Why it stays on top
 
 macOS gives this behavior only to a specific combination of settings, and StickyTop uses all of them:
@@ -92,7 +100,7 @@ Everything else is in the menu bar icon: the list of notes, Recently Deleted, Fl
 
 ## Install
 
-Requires macOS 13 or later, and Xcode (or the Swift 6 toolchain) to build.
+To build from source, you need macOS 13 or later and Xcode (or the Swift 6 toolchain). If you just want the app, use [Download](#download) above.
 
 ```bash
 make install     # builds a universal StickyTop.app, copies it to /Applications, launches it
