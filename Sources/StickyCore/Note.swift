@@ -64,6 +64,15 @@ public struct Note: Codable, Identifiable, Equatable, Sendable {
     public var createdAt: Date
     public var modifiedAt: Date
 
+    /// "Keep Fresh": nudge now and then so the note isn't tuned out.
+    public var keepFresh: Bool
+    /// When the nudge schedule started (turned on, or last edited).
+    public var freshAnchor: Date?
+    public var lastNudge: Date?
+    public var nudgeCount: Int
+    /// Which shade of its color the note currently shows (0 = standard).
+    public var shadeVariant: Int
+
     public init(
         id: UUID = UUID(),
         richText: Data = Data(),
@@ -73,7 +82,12 @@ public struct Note: Codable, Identifiable, Equatable, Sendable {
         opacity: Double = 1,
         isCollapsed: Bool = false,
         createdAt: Date = Date(),
-        modifiedAt: Date? = nil
+        modifiedAt: Date? = nil,
+        keepFresh: Bool = false,
+        freshAnchor: Date? = nil,
+        lastNudge: Date? = nil,
+        nudgeCount: Int = 0,
+        shadeVariant: Int = 0
     ) {
         self.id = id
         self.richText = richText
@@ -84,6 +98,11 @@ public struct Note: Codable, Identifiable, Equatable, Sendable {
         self.isCollapsed = isCollapsed
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt ?? createdAt
+        self.keepFresh = keepFresh
+        self.freshAnchor = freshAnchor
+        self.lastNudge = lastNudge
+        self.nudgeCount = nudgeCount
+        self.shadeVariant = shadeVariant
     }
 
     public var title: String { Self.title(for: plainText) }
@@ -119,6 +138,7 @@ public struct Note: Codable, Identifiable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, richText, plainText, frame, color, opacity, isCollapsed, createdAt, modifiedAt
+        case keepFresh, freshAnchor, lastNudge, nudgeCount, shadeVariant
     }
 
     public init(from decoder: Decoder) throws {
@@ -132,5 +152,16 @@ public struct Note: Codable, Identifiable, Equatable, Sendable {
         isCollapsed = try c.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         modifiedAt = try c.decodeIfPresent(Date.self, forKey: .modifiedAt) ?? createdAt
+        keepFresh = try c.decodeIfPresent(Bool.self, forKey: .keepFresh) ?? false
+        freshAnchor = try c.decodeIfPresent(Date.self, forKey: .freshAnchor)
+        lastNudge = try c.decodeIfPresent(Date.self, forKey: .lastNudge)
+        nudgeCount = try c.decodeIfPresent(Int.self, forKey: .nudgeCount) ?? 0
+        shadeVariant = try c.decodeIfPresent(Int.self, forKey: .shadeVariant) ?? 0
+    }
+
+    /// Whether a fresh note is due for its next nudge.
+    public func isDueForNudge(at now: Date) -> Bool {
+        guard keepFresh else { return false }
+        return FreshSchedule.isDue(anchor: freshAnchor ?? createdAt, lastNudge: lastNudge, now: now)
     }
 }

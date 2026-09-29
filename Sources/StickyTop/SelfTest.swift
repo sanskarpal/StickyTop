@@ -156,6 +156,9 @@ enum SelfTest {
         // Never in the way
         await neverInTheWay(manager: manager, keyNote: note, check: check, settle: settle)
 
+        // Keep Fresh
+        await keepFresh(manager: manager, keyNote: note, check: check, settle: settle)
+
         // Persistence
         manager.saveNow()
         let (onDisk, status) = NoteStore(directory: manager.store.directory).load()
@@ -342,6 +345,187 @@ enum SelfTest {
 
         dodge.inputOverride = nil
         note.delete()
+    }
+
+    private static func keepFresh(
+        manager: NoteManager,
+        keyNote: NoteWindowController,
+        check: (Bool, String) -> Void,
+        settle: () async -> Void
+    ) async {
+        let nudges = manager.nudges
+        nudges.automaticTicks = false
+        nudges.allowsRewording = false
+        NoteWindowController.nudgeCardDuration = 0.4
+        func minutes(_ m: Double, after start: Date) -> Date { start + m * 60 }
+
+        let note = manager.createNote()
+        note.textView.insertText("Call dentist about Friday\nbring insurance card", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await settle()
+        keyNote.focus() // typing in a note pauses its nudges; step out of it
+        await settle()
+
+        let t0 = Date()
+        note.setKeepFresh(true, now: t0)
+        check(note.note.keepFresh && note.note.freshAnchor == t0 && note.note.nudgeCount == 0, "Keep Fresh turns on and starts the schedule")
+
+        nudges.tick(now: minutes(14, after: t0))
+        check(note.note.nudgeCount == 0 && !note.isShowingNudgeCard, "no nudge before the first 15 minutes")
+
+        let shade = note.note.shadeVariant
+        nudges.tick(now: minutes(15, after: t0))
+        await settle()
+        check(note.note.nudgeCount == 1 && note.isShowingNudgeCard, "first nudge at 15 minutes shows the reminder card")
+        check(note.note.shadeVariant != shade, "…and moves the note to a new shade of its color")
+        check(note.nudgeCardMessage == "Call dentist about Friday", "…with the note's first line (template wording)")
+
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        check(!note.isShowingNudgeCard, "the card tucks itself away after a few seconds")
+
+        nudges.tick(now: minutes(20, after: t0))
+        check(note.note.nudgeCount == 1, "no second nudge until the next spaced slot")
+        nudges.tick(now: minutes(45, after: t0))
+        await settle()
+        check(note.note.nudgeCount == 2, "second nudge 30 minutes later")
+        note.dismissNudge()
+        await settle()
+        check(!note.isShowingNudgeCard, "clicking the card dismisses it")
+
+        nudges.tick(now: minutes(600, after: t0))
+        nudges.tick(now: minutes(601, after: t0))
+        check(note.note.nudgeCount == 3, "nudges missed while the Mac slept collapse into one")
+
+        // Typing in the note, hidden notes and pauses all hold nudges back.
+        var count = note.note.nudgeCount
+        note.focus()
+        await settle()
+        if note.panel.isKeyWindow {
+            nudges.tick(now: minutes(800, after: t0))
+            check(note.note.nudgeCount == count, "no nudge while you're typing in the note")
+        } else {
+            // macOS only lets a background app take focus in response to a user action.
+            print("  – skipped \"no nudge while typing\": macOS didn't let the test take keyboard focus")
+            nudges.tick(now: minutes(800, after: t0)) // keep the schedule where the next steps expect it
+        }
+        note.dismissNudge()
+        count = note.note.nudgeCount
+        let t2 = note.note.lastNudge ?? minutes(800, after: t0)
+        manager.hideAll()
+        nudges.tick(now: t2 + 3 * 3600)
+        check(note.note.nudgeCount == count, "no nudge while notes are hidden")
+        manager.showAll()
+        nudges.pause(for: 3600, now: t2 + 3 * 3600)
+        nudges.tick(now: t2 + 3 * 3600 + 1800)
+        check(note.note.nudgeCount == count, "no nudge while nudges are paused")
+        nudges.tick(now: t2 + 4 * 3600 + 60)
+        check(note.note.nudgeCount == count + 1, "nudges resume when the pause ends")
+        note.dismissNudge()
+
+        // Editing makes the note fresh again: the schedule restarts.
+        count = note.note.nudgeCount
+        note.textView.setSelectedRange(NSRange(location: note.textView.string.count, length: 0))
+        note.textView.insertText("!", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let edited = Date()
+        await settle()
+        check(note.note.freshAnchor.map { abs($0.timeIntervalSince(edited)) < 2 } == true && note.note.lastNudge == nil,
+              "editing a fresh note restarts its schedule")
+        nudges.tick(now: minutes(14, after: edited))
+        check(note.note.nudgeCount == count, "…so the next nudge waits a fresh 15 minutes")
+
+        // Collapsed notes have no room for a card: the drag bar carries the reminder.
+        note.toggleCollapsed()
+        await settle()
+        nudges.tick(now: minutes(16, after: edited))
+        await settle()
+        check(note.note.nudgeCount == count + 1 && note.isShowingNudgeTitle && !note.isShowingNudgeCard,
+              "a collapsed note nudges through its drag bar")
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        check(!note.isShowingNudgeTitle, "…then shows its own title again")
+        note.toggleCollapsed()
+        await settle()
+
+        // Several fresh notes due together take turns.
+        let second = manager.createNote()
+        second.textView.insertText("Water the plants", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await settle()
+        keyNote.focus()
+        await settle()
+        let t1 = Date()
+        note.setKeepFresh(true, now: t1)
+        second.setKeepFresh(true, now: t1)
+        nudges.tick(now: minutes(16, after: t1))
+        check(note.note.nudgeCount + second.note.nudgeCount == 1, "two notes due at once don't flash together")
+        nudges.tick(now: minutes(16.5, after: t1))
+        check(note.note.nudgeCount == 1 && second.note.nudgeCount == 1, "…the other takes the next turn")
+        note.dismissNudge()
+        second.dismissNudge()
+
+        // Persistence, then turning it off.
+        manager.saveNow()
+        let saved = NoteStore(directory: manager.store.directory).load().document.notes.first { $0.id == note.id }
+        check(saved?.keepFresh == true && saved?.nudgeCount == 1 && saved?.lastNudge != nil, "fresh state is saved")
+        note.setColor(.green)
+        check(note.note.shadeVariant == 0, "picking a color resets the shade to the standard one")
+        note.setKeepFresh(false)
+        check(!note.note.keepFresh && note.note.shadeVariant == 0 && !note.isShowingNudgeCard, "turning Keep Fresh off restores the note")
+        nudges.tick(now: minutes(600, after: t1))
+        check(note.note.nudgeCount == 0, "…and stops its nudges")
+
+        second.delete()
+        note.delete()
+
+        // Apple Intelligence rewording: opt-in, and only where the model is available.
+        let freshDefaults = UserDefaults(suiteName: "StickyTopSelfTest-\(UUID().uuidString)")!
+        check(!Settings(defaults: freshDefaults).rewordWithAI, "rewording with Apple Intelligence is off until you turn it on")
+        if Rephraser.isAvailable {
+            // The model is non-deterministic: sometimes no candidate passes the safety
+            // check and templates are used. So these checks verify the guarantees that
+            // hold either way, and report how the model did.
+            let original = "Call dentist to reschedule Friday 3pm"
+            let started = Date()
+            let reworded = await Rephraser.reword(original, variation: 1)
+            print("    Apple Intelligence: \"\(original)\" → \(reworded.map { "\"\($0)\"" } ?? "no usable rewording (templates used)") (\(String(format: "%.1f", Date().timeIntervalSince(started))) s)")
+            check(reworded.map { NudgeCopy.acceptRewording($0, of: original) != nil } ?? true,
+                  "anything the model returns has passed the safety check")
+
+            // Through the real nudge path: prepared in the background, shown instantly.
+            let aiNote = manager.createNote()
+            let text = "Renew passport before June 12"
+            aiNote.textView.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            await settle()
+            keyNote.focus()
+            await settle()
+            let t3 = Date()
+            aiNote.setKeepFresh(true, now: t3)
+            manager.settings.rewordWithAI = true
+            nudges.allowsRewording = true
+            nudges.prepareRewordings()
+            for _ in 0..<300 where !nudges.hasPreparedRewording(for: aiNote) {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let prepared = nudges.hasPreparedRewording(for: aiNote)
+            let before = Date()
+            nudges.tick(now: minutes(15, after: t3))
+            let shown = aiNote.nudgeCardMessage ?? ""
+            print("    nudge card: \"\(shown)\"\(prepared ? "" : " (model gave nothing usable this time)")")
+            check(aiNote.note.nudgeCount == 1 && Date().timeIntervalSince(before) < 0.5, "the nudge happens at once, never waiting for the model")
+            if prepared {
+                check(shown.hasPrefix("✦ ") && shown != "✦ \(text)", "a reworded reminder is marked ✦")
+            } else {
+                check(shown == text, "without a usable rewording, the card uses your own words (no ✦)")
+            }
+            check(aiNote.note.plainText == text, "the note's own text is never changed")
+            aiNote.textView.setSelectedRange(NSRange(location: aiNote.textView.string.count, length: 0))
+            aiNote.textView.insertText(" (both kids)", replacementRange: NSRange(location: NSNotFound, length: 0))
+            await settle()
+            check(!nudges.hasPreparedRewording(for: aiNote), "editing the note throws away any rewording of the old text")
+            manager.settings.rewordWithAI = false
+            nudges.allowsRewording = false
+            aiNote.delete()
+        } else {
+            print("  – skipped Apple Intelligence checks: \(Rephraser.unavailableReason)")
+        }
+        NoteWindowController.nudgeCardDuration = 8
     }
 }
 #endif

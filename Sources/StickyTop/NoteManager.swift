@@ -9,6 +9,7 @@ final class Settings {
         static let dodgeCaret = "dodgeCaret"
         static let dragThrough = "dragThrough"
         static let peekThrough = "peekThrough"
+        static let rewordWithAI = "rewordWithAI"
     }
 
     private let defaults: UserDefaults
@@ -21,6 +22,7 @@ final class Settings {
             Key.dodgeCaret: true, // takes effect once Accessibility access is granted
             Key.dragThrough: true,
             Key.peekThrough: true,
+            Key.rewordWithAI: false, // opt-in; also needs Apple Intelligence
         ])
     }
 
@@ -49,6 +51,12 @@ final class Settings {
         set { defaults.set(newValue, forKey: Key.dragThrough) }
     }
 
+    /// Opt-in: fresh-note nudges are reworded by the on-device model (Apple Intelligence).
+    var rewordWithAI: Bool {
+        get { defaults.bool(forKey: Key.rewordWithAI) }
+        set { defaults.set(newValue, forKey: Key.rewordWithAI) }
+    }
+
     /// Holding ⌃⌥ makes every note see-through and click-through.
     var peekThrough: Bool {
         get { defaults.bool(forKey: Key.peekThrough) }
@@ -66,6 +74,7 @@ final class NoteManager {
 
     private(set) var isHidden = false
     private(set) lazy var dodge = DodgeCoordinator(manager: self)
+    private(set) lazy var nudges = NudgeCoordinator(manager: self)
     private var document = NotesDocument()
     private var controllers: [NoteWindowController] = []
     private var pendingSave: Task<Void, Never>?
@@ -100,6 +109,10 @@ final class NoteManager {
         if status != .loaded { saveNow() }
     }
 
+    #if DEBUG
+    func openForDemo(_ note: Note) -> NoteWindowController { open(note) }
+    #endif
+
     @discardableResult
     private func open(_ note: Note) -> NoteWindowController {
         let controller = NoteWindowController(note: note, manager: self)
@@ -108,6 +121,7 @@ final class NoteManager {
         controllers.append(controller)
         if !isHidden { controller.show() }
         dodge.refresh()
+        nudges.refresh()
         return controller
     }
 
@@ -146,6 +160,7 @@ final class NoteManager {
             document.moveToTrash(controller.note)
         }
         dodge.refresh()
+        nudges.refresh()
         saveNow()
     }
 
@@ -168,6 +183,7 @@ final class NoteManager {
         isHidden = false
         controllers.forEach { $0.show() }
         dodge.refresh()
+        nudges.refresh()
         onStateChange?()
     }
 
@@ -175,6 +191,7 @@ final class NoteManager {
         isHidden = true
         controllers.forEach { $0.panel.orderOut(nil) }
         dodge.refresh()
+        nudges.refresh()
         onStateChange?()
     }
 
@@ -277,12 +294,13 @@ final class NoteManager {
     // MARK: Development
 
     /// Writes each note as PNG (plain, then as it looks under the pointer).
-    func writeSnapshots(to directory: URL) {
+    func writeSnapshots(to directory: URL, suffix: String = "", includeHover: Bool = true) {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for (index, controller) in controllers.enumerated() {
             controller.panel.makeFirstResponder(nil) // no caret in the picture
-            let name = String(format: "note-%02d", index + 1)
+            let name = String(format: "note-%02d", index + 1) + suffix
             try? controller.snapshotPNG()?.write(to: directory.appendingPathComponent("\(name).png"))
+            guard includeHover else { continue }
             controller.setHovering(true)
             try? controller.snapshotPNG()?.write(to: directory.appendingPathComponent("\(name)-hover.png"))
             controller.setHovering(false)

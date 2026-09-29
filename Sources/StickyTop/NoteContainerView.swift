@@ -6,6 +6,8 @@ import StickyCore
 final class NoteContainerView: NSView {
     let header = NoteHeaderView(frame: .zero)
     let scrollView = NSScrollView(frame: .zero)
+    let nudgeCard = NudgeCardView()
+    private let flashLayer = CALayer()
 
     var onHoverChanged: ((Bool) -> Void)?
 
@@ -15,6 +17,12 @@ final class NoteContainerView: NSView {
 
     var fillColor: NSColor = .white {
         didSet { layer?.backgroundColor = fillColor.cgColor }
+    }
+
+    /// Changes the paper color, cross-fading when `animated` (fresh notes' new shade).
+    func setFillColor(_ color: NSColor, animated: Bool) {
+        if animated, let layer { layer.crossFade("backgroundColor", to: color.cgColor, duration: 0.8) }
+        fillColor = color
     }
 
     var isCollapsed = false {
@@ -48,8 +56,15 @@ final class NoteContainerView: NSView {
         layer?.borderColor = NSColor(white: 0, alpha: 0.14).cgColor
 
         addSubview(scrollView)
+        addSubview(nudgeCard)
         addSubview(header)
         handles.forEach(addSubview)
+        nudgeCard.isHidden = true
+
+        flashLayer.backgroundColor = NSColor.white.cgColor
+        flashLayer.opacity = 0
+        flashLayer.zPosition = 50
+        layer?.addSublayer(flashLayer)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -72,6 +87,77 @@ final class NoteContainerView: NSView {
         bottomHandle.frame = NSRect(x: corner, y: 0, width: max(0, width - 2 * corner), height: edge)
         bottomLeftHandle.frame = NSRect(x: 0, y: 0, width: corner, height: corner)
         cornerHandle.frame = NSRect(x: width - corner, y: 0, width: corner, height: corner)
+        nudgeCard.frame = cardFrame
+        flashLayer.frame = bounds
+    }
+
+    /// Along the bottom edge, where notes are usually blank, so it doesn't hide your text.
+    private var cardFrame: NSRect {
+        NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: 46)
+    }
+
+    // MARK: Nudges
+
+    /// Whether the card is (or is animating to be) shown. Flips immediately on
+    /// dismiss, unlike `isHidden`, which waits for the fade-out.
+    private(set) var isNudgeCardShown = false
+
+    /// Slides the reminder card up from the bottom edge.
+    func showNudgeCard(lead: String, message: String, fill: NSColor) {
+        nudgeCard.configure(lead: lead, message: message, fill: fill)
+        isNudgeCardShown = true
+        let final = cardFrame
+        nudgeCard.frame = final.offsetBy(dx: 0, dy: -10)
+        nudgeCard.alphaValue = 0
+        nudgeCard.isHidden = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            nudgeCard.animator().frame = final
+            nudgeCard.animator().alphaValue = 1
+        }
+    }
+
+    func hideNudgeCard(animated: Bool) {
+        guard isNudgeCardShown else { return }
+        isNudgeCardShown = false
+        guard animated else {
+            nudgeCard.isHidden = true
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.25
+            nudgeCard.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.isNudgeCardShown else { return } // re-shown meanwhile
+                self.nudgeCard.isHidden = true
+            }
+        })
+    }
+
+    /// Two soft beats of light and a glowing edge — noticeable, not alarming.
+    func playNudgeFlash(glow: NSColor) {
+        let beats: [NSNumber] = [0, 1, 0, 0.8, 0]
+        let times: [NSNumber] = [0, 0.2, 0.5, 0.7, 1]
+
+        let flash = CAKeyframeAnimation(keyPath: "opacity")
+        flash.values = beats.map { NSNumber(value: $0.doubleValue * 0.35) }
+        flash.keyTimes = times
+        flash.duration = 1.1
+        flashLayer.add(flash, forKey: "nudge")
+
+        let width = CAKeyframeAnimation(keyPath: "borderWidth")
+        width.values = beats.map { NSNumber(value: 0.5 + $0.doubleValue * 2.5) }
+        width.keyTimes = times
+        let color = CAKeyframeAnimation(keyPath: "borderColor")
+        let base = NSColor(white: 0, alpha: 0.14).cgColor
+        color.values = [base, glow.cgColor, base, glow.cgColor, base]
+        color.keyTimes = times
+        let group = CAAnimationGroup()
+        group.animations = [width, color]
+        group.duration = 1.1
+        layer?.add(group, forKey: "nudge")
     }
 
     override func updateTrackingAreas() {

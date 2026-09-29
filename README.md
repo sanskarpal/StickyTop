@@ -40,6 +40,17 @@ Dodging the text cursor needs **Accessibility** access. Turn it on under the men
 
 It works wherever apps report their text cursor to Accessibility, which covers most native Mac apps. Chromium and Electron apps (Chrome, Slack, VS Code…) are asked to switch their accessibility support on; how well they report the cursor varies. **After every update, grant access again.** This build is ad-hoc signed, so macOS ties the grant to the exact binary. After an update, System Settings still shows StickyTop switched **on**, but the grant no longer applies, and toggling it doesn't help. Remove StickyTop with **−** in **System Settings → Privacy & Security → Accessibility** and add it again with **+**. A Developer ID-signed build would keep the grant across updates.
 
+## Keep Fresh: notes you can't tune out
+
+When a note never changes, people soon stop seeing it. This is called reminder blindness, and the usual fix is to move, recolor or reword the note from time to time. That's also a common strategy for ADHD. Turn on **Keep Fresh** from a note's ••• menu and StickyTop does it for you:
+
+- **Spaced nudges.** The first comes after 15 minutes, then 30 minutes, 1 hour, 2 hours, and every 2 hours after that. If the Mac sleeps through several, you get one nudge on waking, not a burst.
+- **Every nudge looks different.** The note gives a soft double flash with a glowing edge and shifts to a new shade of its color, so it never looks quite the same twice. A reminder card also slides up from the bottom edge with rotating wording and the note's age, for example *"Still on your list · 3 days"*. Click the card to dismiss it; otherwise it tucks itself away after a few seconds. A collapsed note shows the reminder in its drag bar instead.
+- **Reworded by Apple Intelligence (optional, off by default).** Turn on **Nudges → Reword with Apple Intelligence** (needs macOS 26 with Apple Intelligence enabled). The on-device model prepares a new phrasing of the note's first line in the background before each nudge, so nudges never wait on it. For example, "Pick up Maya from soccer at 5" becomes "✦ Collect Maya from soccer at 5". Reworded reminders are marked **✦**, it runs offline, and your note itself is never changed. Every rewording must pass a safety check before it's shown: it must keep every name, number and date, invent no times, deadlines or people, not claim the task is done, and actually read differently. Otherwise the rotating templates are used. A small model can still drift slightly (in testing, "renew" became "apply for" once), which is why the ✦ marks it and your own words stay visible above the card.
+- **Respectful.** StickyTop doesn't nudge while you're typing in the note, while notes are hidden or dodging your cursor, or while nudges are paused. Editing a note restarts its schedule, and picking a color resets its shade.
+
+The menu bar → **Nudges** menu has **Nudge Fresh Notes Now**, **Pause Nudges for 1 Hour**, and the Apple Intelligence switch.
+
 ## Features
 
 - Unlimited notes in 6 Stickies colors, with rich text (bold, italic, underline, strikethrough, sizes, links).
@@ -47,6 +58,7 @@ It works wherever apps report their text cursor to Accessibility, which covers m
 - Double-click the top bar to collapse a note to one line. The line shows the note's title.
 - Opacity levels of 100%, 85%, 70% and 50%. A translucent note turns solid while the pointer is over it.
 - **Never in the way**: notes dodge your text cursor, let drags pass through, and turn see-through while you hold ⌃⌥ (see above).
+- **Keep Fresh**: spaced nudges with a new shade and a reminder card, so you keep noticing a note (see above).
 - **Lock** (click-through): notes stay visible, but clicks pass through to the app underneath.
 - **Global hotkeys** work from any app, with no Accessibility permission needed.
 - **Recently Deleted**: the last 30 deleted notes can be restored from the menu bar. Blank notes are discarded.
@@ -91,7 +103,7 @@ Other targets:
 ```bash
 make test        # unit tests (model, persistence, geometry)
 make app         # dist/StickyTop.app (ad-hoc signed)
-make dmg         # dist/StickyTop-1.1.0.dmg (drag-to-Applications)
+make dmg         # dist/StickyTop-1.2.0.dmg (drag-to-Applications)
 make verify      # full-screen overlay check (StickyTop must be running)
 make verify-dodge  # real text-cursor dodge check (installed app needs Accessibility; hands off ~10 s)
 ```
@@ -102,14 +114,20 @@ In-app integration test (debug builds; uses a scratch folder, never your notes):
 swift build && .build/debug/StickyTop --data-dir /tmp/stickytop-test --self-test
 ```
 
+Live, narrated demo of Keep Fresh nudges (debug builds; throwaway notes, about 35 s):
+
+```bash
+swift build && .build/debug/StickyTop --demo-nudges
+```
+
 ### Distributing to other Macs
 
 The default build is ad-hoc signed, which is fine for your own Mac. For other Macs, sign with a Developer ID and notarize:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make dmg
-xcrun notarytool submit dist/StickyTop-1.1.0.dmg --keychain-profile <profile> --wait
-xcrun stapler staple dist/StickyTop-1.1.0.dmg
+xcrun notarytool submit dist/StickyTop-1.2.0.dmg --keychain-profile <profile> --wait
+xcrun stapler staple dist/StickyTop-1.2.0.dmg
 ```
 
 ## Data
@@ -119,13 +137,15 @@ Notes live in `~/Library/Application Support/StickyTop/notes.json`. The previous
 ## Project layout
 
 ```
-Sources/StickyCore/     Model, JSON store, frame + dodge geometry (pure Swift, unit-tested)
+Sources/StickyCore/     Model, JSON store, frame + dodge geometry, nudge schedule (pure Swift, unit-tested)
 Sources/StickyTop/      AppKit app
   NotePanel.swift         The always-on-top window configuration
   NoteWindowController    One note: view setup, model sync, shortcuts, menu
   NoteManager             All notes: create/delete/restore, save, screens, prefs
   DodgeCoordinator        "Never in the way": caret dodge, drag-through, peek
   CaretTracker            Accessibility-based text-cursor finder (background queue)
+  NudgeCoordinator        "Keep Fresh": spaced nudges, pause, on-device rewording
+  Rephraser               Apple Foundation Models rewording (macOS 26+, optional)
   StatusMenuController    Menu bar icon + menu
   HotKeys.swift           Carbon global hotkeys
   SelfTest.swift          In-process integration test (DEBUG only)

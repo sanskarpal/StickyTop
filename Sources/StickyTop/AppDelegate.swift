@@ -35,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         manager.start()
 
         #if DEBUG
+        if options.demoNudges {
+            Task { @MainActor [manager] in await NudgeDemo.run(manager: manager!) }
+            return
+        }
         if options.selfTest {
             guard isScratchInstance else {
                 print("--self-test needs --data-dir so it never touches your real notes")
@@ -47,8 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let snapshotDirectory = options.snapshotDirectory {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [manager] in
-                manager?.writeSnapshots(to: snapshotDirectory)
-                NSApp.terminate(nil)
+                guard let manager else { return }
+                manager.writeSnapshots(to: snapshotDirectory)
+                // Then each note mid-nudge, card showing, in its next shade.
+                manager.visibleControllers.forEach { $0.nudge(rewording: nil) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                    manager.writeSnapshots(to: snapshotDirectory, suffix: "-nudge", includeHover: false)
+                    NSApp.terminate(nil)
+                }
             }
             return
         }
@@ -56,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenu = StatusMenuController(manager: manager)
         manager.onStateChange = { [weak self] in self?.statusMenu.updateIcon() }
         manager.dodge.start()
+        manager.nudges.refresh()
         if !isScratchInstance { registerHotKeys() }
         observeSystem()
     }
@@ -96,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observe(workspace, NSWorkspace.didWakeNotification) { manager in
             manager.keepNotesOnScreen()
             manager.reassertStacking()
+            manager.nudges.tick() // nudges missed while asleep collapse into one
         }
         observe(distributed, Self.showNotesNotification) { manager in
             manager.showAll()

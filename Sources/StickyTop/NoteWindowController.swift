@@ -94,6 +94,7 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         header.menuProvider = { [weak self] in self?.makeNoteMenu() ?? NSMenu() }
         container.onHoverChanged = { [weak self] inside in self?.setHovering(inside) }
         container.onResizeEnded = { [weak self] in self?.manager.saveSoon() }
+        container.nudgeCard.onClick = { [weak self] in self?.dismissNudge() }
     }
 
     private func loadText() {
@@ -148,7 +149,13 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         textIsDirty = true
         note.plainText = textView.string
         note.modifiedAt = Date()
-        container.header.title = note.title
+        if !isShowingNudgeTitle { container.header.title = note.title }
+        if note.keepFresh {
+            // An edited note is fresh again: restart its nudge schedule.
+            note.freshAnchor = note.modifiedAt
+            note.lastNudge = nil
+            dismissNudge()
+        }
         manager.saveSoon()
     }
 
@@ -206,13 +213,14 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
 
     func setColor(_ color: NoteColor) {
         note.color = color
+        note.shadeVariant = 0 // a deliberate color choice resets the fresh-note shade
         applyColor()
         manager.saveSoon()
     }
 
-    private func applyColor() {
-        container.fillColor = note.color.body.nsColor
-        container.header.fillColor = note.color.header.nsColor
+    private func applyColor(animated: Bool = false) {
+        container.setFillColor(note.color.body(variant: note.shadeVariant).nsColor, animated: animated)
+        container.header.setFillColor(note.color.header(variant: note.shadeVariant).nsColor, animated: animated)
     }
 
     func setOpacity(_ opacity: Double) {
@@ -244,6 +252,7 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
 
     func toggleCollapsed() {
+        dismissNudge()
         snapHome()
         note.isCollapsed.toggle()
         applyCollapsedState(animated: true)
@@ -380,6 +389,74 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         })
     }
 
+    // MARK: Keep Fresh
+
+    /// How long a nudge's reminder card stays up (tests shorten it).
+    static var nudgeCardDuration: TimeInterval = 8
+    private var nudgeDismissTask: Task<Void, Never>?
+    private(set) var isShowingNudgeTitle = false
+
+    var isShowingNudgeCard: Bool { container.isNudgeCardShown }
+    var nudgeCardMessage: String? { isShowingNudgeCard ? container.nudgeCard.message : nil }
+
+    /// A note can nudge only when it's visible, in place and not in use.
+    var canNudge: Bool {
+        panel.isVisible && !isGhosted && dodgedFrame == nil && !panel.isKeyWindow
+    }
+
+    func setKeepFresh(_ on: Bool, now: Date = Date()) {
+        note.keepFresh = on
+        note.freshAnchor = on ? now : nil
+        note.lastNudge = nil
+        note.nudgeCount = 0
+        if !on {
+            note.shadeVariant = 0
+            applyColor(animated: true)
+            dismissNudge()
+        }
+        manager.saveSoon()
+        manager.nudges.refresh()
+    }
+
+    /// One nudge: a soft flash, a new shade of the note's color, and a reminder
+    /// card with rotating wording (or `rewording` from the on-device model).
+    func nudge(rewording: String?, now: Date = Date()) {
+        let lead = "\(NudgeCopy.lead(forNudge: note.nudgeCount)) · \(NudgeCopy.age(from: note.createdAt, to: now))"
+        // ✦ marks wording from Apple Intelligence; your own words stay right above the card.
+        let message = rewording.map { "✦ \($0)" } ?? note.title
+        note.nudgeCount += 1
+        note.lastNudge = now
+        note.shadeVariant = (note.shadeVariant + 1) % NoteColor.shadeVariantCount
+        applyColor(animated: true)
+        container.playNudgeFlash(glow: note.color.header(variant: note.shadeVariant).nsColor.shadow(withLevel: 0.25) ?? .systemYellow)
+
+        if note.isCollapsed {
+            // No room for a card: the drag bar says it instead.
+            isShowingNudgeTitle = true
+            container.header.title = "\(message) — \(lead.lowercased())"
+        } else {
+            container.showNudgeCard(lead: lead, message: message, fill: note.color.header(variant: note.shadeVariant).nsColor)
+        }
+        nudgeDismissTask?.cancel()
+        nudgeDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.nudgeCardDuration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.dismissNudge()
+        }
+        manager.saveSoon()
+    }
+
+    /// Hides the reminder card (clicked, timed out, or the note was edited).
+    func dismissNudge() {
+        nudgeDismissTask?.cancel()
+        nudgeDismissTask = nil
+        container.hideNudgeCard(animated: true)
+        if isShowingNudgeTitle {
+            isShowingNudgeTitle = false
+            container.header.title = note.title
+        }
+    }
+
     // MARK: Menu
 
     func makeNoteMenu() -> NSMenu {
@@ -409,6 +486,11 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         cycle.target = self
         menu.addItem(withTitle: "Opacity", action: nil, keyEquivalent: "").submenu = opacityMenu
 
+        let fresh = menu.addItem(withTitle: "Keep Fresh", action: #selector(keepFreshSelected), keyEquivalent: "")
+        fresh.target = self
+        fresh.state = note.keepFresh ? .on : .off
+        fresh.toolTip = "Nudges you now and then — a soft flash, a new shade, a reminder card — so you don't tune this note out."
+
         let collapse = menu.addItem(withTitle: note.isCollapsed ? "Expand" : "Collapse", action: #selector(collapseSelected), keyEquivalent: "m")
         collapse.target = self
         menu.addItem(.separator())
@@ -432,6 +514,7 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
 
     @objc private func cycleOpacity() { setOpacity(Note.nextOpacity(after: note.opacity)) }
     @objc private func collapseSelected() { toggleCollapsed() }
+    @objc private func keepFreshSelected() { setKeepFresh(!note.keepFresh) }
     @objc private func newNoteSelected() { manager.createNote(cascadingFrom: self) }
     @objc private func deleteSelected() { delete() }
 

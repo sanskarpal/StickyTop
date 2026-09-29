@@ -9,6 +9,7 @@ struct LaunchOptions {
     var dataDirectory: URL?
     var snapshotDirectory: URL?
     var selfTest = false
+    var demoNudges = false
 
     init(arguments: [String] = CommandLine.arguments) {
         func value(after flag: String) -> URL? {
@@ -18,6 +19,12 @@ struct LaunchOptions {
         dataDirectory = value(after: "--data-dir")
         snapshotDirectory = value(after: "--snapshot")
         selfTest = arguments.contains("--self-test")
+        demoNudges = arguments.contains("--demo-nudges")
+        if demoNudges && dataDirectory == nil {
+            // The demo never touches your real notes.
+            dataDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("StickyTopDemo-\(UUID().uuidString)", isDirectory: true)
+        }
     }
 }
 

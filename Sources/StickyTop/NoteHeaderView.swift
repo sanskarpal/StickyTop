@@ -11,6 +11,11 @@ final class NoteHeaderView: NSView {
         didSet { layer?.backgroundColor = fillColor.cgColor }
     }
 
+    func setFillColor(_ color: NSColor, animated: Bool) {
+        if animated, let layer { layer.crossFade("backgroundColor", to: color.cgColor, duration: 0.8) }
+        fillColor = color
+    }
+
     var title: String {
         get { titleField.stringValue }
         set { titleField.stringValue = newValue }

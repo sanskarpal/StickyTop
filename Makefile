@@ -1,4 +1,4 @@
-VERSION ?= 1.1.0
+VERSION ?= 1.2.0
 APP := dist/StickyTop.app
 
 .PHONY: build test app run install quit dmg verify verify-dodge clean

@@ -63,6 +63,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(neverInTheWayItem())
+        menu.addItem(nudgesItem())
         add("Float Above Everything", action: #selector(toggleFloatAboveEverything))
             .state = manager.settings.floatAboveEverything ? .on : .off
         let login = add("Launch at Login", action: #selector(toggleLaunchAtLogin))
@@ -158,7 +159,59 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func nudgesItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Nudges", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let nudges = manager.nudges
+        let freshCount = manager.notes.filter(\.keepFresh).count
+
+        if freshCount == 0 {
+            submenu.addItem(withTitle: "No notes kept fresh yet —", action: nil, keyEquivalent: "").isEnabled = false
+            submenu.addItem(withTitle: "choose Keep Fresh in a note's ••• menu.", action: nil, keyEquivalent: "").isEnabled = false
+            submenu.addItem(.separator())
+        }
+
+        let now = add(to: submenu, "Nudge Fresh Notes Now", action: #selector(nudgeNow))
+        now.isEnabled = freshCount > 0 && !manager.isHidden
+
+        if nudges.isPaused(), let until = nudges.pausedUntil {
+            let time = until.formatted(date: .omitted, time: .shortened)
+            add(to: submenu, "Resume Nudges (paused until \(time))", action: #selector(resumeNudges))
+        } else {
+            add(to: submenu, "Pause Nudges for 1 Hour", action: #selector(pauseNudges))
+        }
+
+        submenu.addItem(.separator())
+        let reword = add(to: submenu, "Reword with Apple Intelligence", action: #selector(toggleRewording))
+        if Rephraser.isAvailable {
+            reword.state = manager.settings.rewordWithAI ? .on : .off
+            reword.toolTip = "Nudges reword your reminder on-device (marked ✦), so it reads freshly each time. Your note itself is never changed. A small model can drift slightly; your own words stay visible above the card."
+        } else {
+            reword.isEnabled = false
+            submenu.addItem(withTitle: Rephraser.unavailableReason, action: nil, keyEquivalent: "").isEnabled = false
+        }
+
+        item.submenu = submenu
+        return item
+    }
+
+    @discardableResult
+    private func add(to submenu: NSMenu, _ title: String, action: Selector) -> NSMenuItem {
+        let item = submenu.addItem(withTitle: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
     // MARK: Actions
+
+    @objc private func nudgeNow() { manager.nudges.nudgeNow() }
+    @objc private func pauseNudges() { manager.nudges.pause(for: 3600) }
+    @objc private func resumeNudges() { manager.nudges.resume() }
+    @objc private func toggleRewording() {
+        manager.settings.rewordWithAI.toggle()
+        manager.nudges.prepareRewordings()
+    }
 
     @objc private func toggleCaretDodge() {
         if CaretTracker.isTrusted && manager.settings.dodgeCaret {
