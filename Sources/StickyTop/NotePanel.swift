@@ -40,7 +40,29 @@ final class NotePanel: NSPanel {
         appearance = NSAppearance(named: .aqua)
     }
 
-    override var canBecomeKey: Bool { true }
+    /// Set while StickyTop focuses the note on purpose (new note, restore…).
+    private var focusRequested = false
+
+    /// Takes keyboard focus deliberately. The only programmatic way a note becomes key.
+    func makeKeyOnPurpose() {
+        focusRequested = true
+        makeKey()
+        focusRequested = false
+    }
+
+    /// A note takes keyboard focus only when you click it or StickyTop focuses it
+    /// on purpose — never on AppKit's own initiative (e.g. while the app launches
+    /// at login), which would silently send your typing into a note.
+    override var canBecomeKey: Bool {
+        if isKeyWindow || focusRequested { return true }
+        guard let event = NSApp.currentEvent else { return false }
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            return event.windowNumber == windowNumber
+        default:
+            return false
+        }
+    }
     override var canBecomeMain: Bool { false }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

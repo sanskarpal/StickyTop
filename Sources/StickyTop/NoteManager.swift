@@ -6,13 +6,22 @@ final class Settings {
     private enum Key {
         static let floatAboveEverything = "floatAboveEverything"
         static let clickThrough = "clickThrough"
+        static let dodgeCaret = "dodgeCaret"
+        static let dragThrough = "dragThrough"
+        static let peekThrough = "peekThrough"
     }
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        defaults.register(defaults: [Key.floatAboveEverything: true, Key.clickThrough: false])
+        defaults.register(defaults: [
+            Key.floatAboveEverything: true,
+            Key.clickThrough: false,
+            Key.dodgeCaret: true, // takes effect once Accessibility access is granted
+            Key.dragThrough: true,
+            Key.peekThrough: true,
+        ])
     }
 
     /// Notes sit at status-bar level (above every app window, including other
@@ -27,6 +36,24 @@ final class Settings {
         get { defaults.bool(forKey: Key.clickThrough) }
         set { defaults.set(newValue, forKey: Key.clickThrough) }
     }
+
+    /// Notes slide clear of the text caret in other apps.
+    var dodgeCaret: Bool {
+        get { defaults.bool(forKey: Key.dodgeCaret) }
+        set { defaults.set(newValue, forKey: Key.dodgeCaret) }
+    }
+
+    /// Drags that start outside the notes pass through them.
+    var dragThrough: Bool {
+        get { defaults.bool(forKey: Key.dragThrough) }
+        set { defaults.set(newValue, forKey: Key.dragThrough) }
+    }
+
+    /// Holding ⌃⌥ makes every note see-through and click-through.
+    var peekThrough: Bool {
+        get { defaults.bool(forKey: Key.peekThrough) }
+        set { defaults.set(newValue, forKey: Key.peekThrough) }
+    }
 }
 
 /// Owns every note window, the document on disk, and the global note actions.
@@ -38,6 +65,7 @@ final class NoteManager {
     var onStateChange: (() -> Void)?
 
     private(set) var isHidden = false
+    private(set) lazy var dodge = DodgeCoordinator(manager: self)
     private var document = NotesDocument()
     private var controllers: [NoteWindowController] = []
     private var pendingSave: Task<Void, Never>?
@@ -47,6 +75,7 @@ final class NoteManager {
     }
 
     var notes: [Note] { controllers.map(\.note) }
+    var visibleControllers: [NoteWindowController] { controllers.filter { $0.panel.isVisible } }
     var trash: [Note] { document.trash }
 
     var windowLevel: NSWindow.Level {
@@ -75,9 +104,10 @@ final class NoteManager {
     private func open(_ note: Note) -> NoteWindowController {
         let controller = NoteWindowController(note: note, manager: self)
         controller.panel.level = windowLevel
-        controller.panel.ignoresMouseEvents = settings.clickThrough
+        controller.isLocked = settings.clickThrough
         controllers.append(controller)
         if !isHidden { controller.show() }
+        dodge.refresh()
         return controller
     }
 
@@ -115,6 +145,7 @@ final class NoteManager {
         if !controller.note.isBlank {
             document.moveToTrash(controller.note)
         }
+        dodge.refresh()
         saveNow()
     }
 
@@ -136,12 +167,14 @@ final class NoteManager {
     func showAll() {
         isHidden = false
         controllers.forEach { $0.show() }
+        dodge.refresh()
         onStateChange?()
     }
 
     func hideAll() {
         isHidden = true
         controllers.forEach { $0.panel.orderOut(nil) }
+        dodge.refresh()
         onStateChange?()
     }
 
@@ -152,7 +185,7 @@ final class NoteManager {
     func focus(noteID: UUID) {
         guard let controller = controllers.first(where: { $0.id == noteID }) else { return }
         if isHidden { showAll() }
-        let frame = controller.panel.frame
+        let frame = controller.homeDisplayedFrame
         let reachable = NoteGeometry.clamp(frame, to: screenAreas)
         if reachable != frame { controller.setDisplayedFrame(reachable) }
         controller.focus()
@@ -180,7 +213,7 @@ final class NoteManager {
 
     func setClickThrough(_ enabled: Bool) {
         settings.clickThrough = enabled
-        controllers.forEach { $0.panel.ignoresMouseEvents = enabled }
+        controllers.forEach { $0.isLocked = enabled }
         onStateChange?()
     }
 
@@ -198,7 +231,7 @@ final class NoteManager {
     func keepNotesOnScreen() {
         let screens = screenAreas
         for controller in controllers {
-            let frame = controller.panel.frame
+            let frame = controller.homeDisplayedFrame
             let reachable = NoteGeometry.clamp(frame, to: screens)
             if reachable != frame { controller.setDisplayedFrame(reachable) }
         }
@@ -209,7 +242,7 @@ final class NoteManager {
     func gatherNotes() {
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return }
-        let frames = NoteGeometry.gathered(controllers.map { $0.panel.frame }, in: screen.visibleFrame)
+        let frames = NoteGeometry.gathered(controllers.map(\.homeDisplayedFrame), in: screen.visibleFrame)
         for (controller, frame) in zip(controllers, frames) {
             controller.setDisplayedFrame(frame, animate: true)
         }
@@ -265,11 +298,12 @@ final class NoteManager {
             attributes: [.font: bold, .foregroundColor: Theme.ink]
         )
         let body = """
-        This note floats above every app, every desktop and full-screen windows.
+        This note floats above every app, desktop and full-screen window, and slides aside when you type behind it.
 
         ⌃⌥N  new note from anywhere
         ⌃⌥H  hide / show all notes
         ⌃⌥L  lock notes (clicks pass through)
+        hold ⌃⌥  peek through every note
 
         Double-click the top bar to collapse.
         ⌘1–⌘6 color · ⌥⌘T opacity · ⌘B ⌘I ⌘U
@@ -280,7 +314,7 @@ final class NoteManager {
             attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: Theme.ink]
         ))
 
-        let size = CGSize(width: 290, height: 240)
+        let size = CGSize(width: 290, height: 290)
         let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         let frame = NoteGeometry.fit(
             CGRect(x: visible.maxX - size.width - 32, y: visible.maxY - size.height - 32, width: size.width, height: size.height),

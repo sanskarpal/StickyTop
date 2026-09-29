@@ -14,7 +14,25 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
     private var textIsDirty = false
     /// Set while we move the panel ourselves, so delegate callbacks don't echo.
     private var isApplyingFrame = false
+    /// Temporary (dodge) moves still animating; their frames must not become home.
+    private var temporaryMovesInFlight = 0
     private var isHovering = false
+
+    /// Why the note is currently see-through and click-through.
+    enum GhostReason: Hashable { case caret, drag, peek }
+    static let ghostAlpha: CGFloat = 0.12
+    private var ghostReasons: Set<GhostReason> = []
+    /// Where the note sits while dodging the caret; nil when at home.
+    private(set) var dodgedFrame: CGRect?
+    /// When the caret last left the note's home area (nil while it's still there).
+    private var homeClearSince: TimeInterval?
+
+    /// Click-through lock (set by the manager).
+    var isLocked = false {
+        didSet { applyInteractivity() }
+    }
+
+    var isGhosted: Bool { !ghostReasons.isEmpty }
 
     var id: UUID { note.id }
 
@@ -98,7 +116,7 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
     /// app, so the full-screen app underneath stays put.
     func focus() {
         panel.orderFrontRegardless()
-        panel.makeKey()
+        panel.makeKeyOnPurpose()
         if !note.isCollapsed {
             panel.makeFirstResponder(textView)
         }
@@ -135,14 +153,23 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard !isApplyingFrame else { return }
-        recordFrame()
-        manager.saveSoon()
+        guard !isMovingProgrammatically else { return }
+        userMovedNote()
     }
 
     func windowDidResize(_ notification: Notification) {
         panel.invalidateShadow()
-        guard !isApplyingFrame else { return }
+        guard !isMovingProgrammatically else { return }
+        userMovedNote()
+    }
+
+    private var isMovingProgrammatically: Bool {
+        isApplyingFrame || temporaryMovesInFlight > 0
+    }
+
+    /// The user dragged or resized the note: wherever it is now is its new home.
+    private func userMovedNote() {
+        dodgedFrame = nil
         recordFrame()
         manager.saveSoon()
     }
@@ -160,8 +187,14 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
 
-    /// Moves the panel to `frame` (the frame as displayed — collapsed or not).
+    /// Moves the panel to `frame` (the frame as displayed — collapsed or not)
+    /// and makes it the note's home.
     func setDisplayedFrame(_ frame: CGRect, animate: Bool = false) {
+        if temporaryMovesInFlight > 0 {
+            moveTemporarily(to: frame, duration: 0) // supersede a dodge still sliding
+        }
+        dodgedFrame = nil
+        setGhost(.caret, false)
         isApplyingFrame = true
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
         isApplyingFrame = false
@@ -189,9 +222,10 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
         manager.saveSoon()
     }
 
-    /// Translucent notes turn solid while the pointer is over them.
+    /// Translucent notes turn solid while the pointer is over them; ghosted
+    /// notes (dodging, peeking, dragged through) are nearly invisible.
     private func applyOpacity(animated: Bool) {
-        let target = CGFloat(isHovering ? 1 : note.opacity)
+        let target: CGFloat = isGhosted ? Self.ghostAlpha : CGFloat(isHovering ? 1 : note.opacity)
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.15
@@ -210,6 +244,7 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
 
     func toggleCollapsed() {
+        snapHome()
         note.isCollapsed.toggle()
         applyCollapsedState(animated: true)
         manager.saveSoon()
@@ -238,6 +273,111 @@ final class NoteWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate
             target = expanded
         }
         setDisplayedFrame(target, animate: animated)
+    }
+
+    // MARK: Never in the way
+
+    /// The displayed frame when the note isn't dodging.
+    var homeDisplayedFrame: CGRect {
+        note.isCollapsed ? NoteGeometry.collapsed(note.frame) : note.frame
+    }
+
+    func setGhost(_ reason: GhostReason, _ on: Bool) {
+        let before = ghostReasons
+        if on { ghostReasons.insert(reason) } else { ghostReasons.remove(reason) }
+        guard ghostReasons != before else { return }
+        // A ghost ignores the mouse, so it will never hear "mouse exited".
+        if isGhosted && isHovering { setHovering(false) }
+        applyOpacity(animated: true)
+        applyInteractivity()
+    }
+
+    /// Tracking areas miss "mouse exited" when the note moves out from under a
+    /// still pointer. The watcher calls this each tick to correct that.
+    func syncHover(pointer: CGPoint) {
+        if isHovering && !panel.frame.contains(pointer) { setHovering(false) }
+    }
+
+    private func applyInteractivity() {
+        panel.ignoresMouseEvents = isLocked || isGhosted
+    }
+
+    /// Keeps the note off the line being typed in another app. Called ~10×/s.
+    /// `caret` and `pointer` are in AppKit screen coordinates; `caret` is nil
+    /// when nobody is typing. `pointerIsActive` means the pointer moved recently
+    /// (macOS hides a resting pointer while you type, so a parked one doesn't count).
+    func updateDodge(caret: CGRect?, pointer: CGPoint, pointerIsActive: Bool, now: TimeInterval) {
+        guard panel.isVisible else { return }
+        let home = homeDisplayedFrame
+        let current = dodgedFrame ?? home
+
+        if let caret, NoteDodge.isObstructing(current, caret: caret) {
+            homeClearSince = nil
+            // Don't pull a note away while you're using it with the pointer, or typing in it.
+            let usingWithPointer = pointerIsActive && panel.frame.contains(pointer)
+            guard !usingWithPointer, !panel.isKeyWindow else { return }
+            let visible = (NSScreen.screens.first { $0.frame.intersects(home) } ?? NSScreen.main)?.visibleFrame ?? home
+            if let escape = NoteDodge.escapeFrame(for: home, avoidingCaret: caret, within: visible) {
+                setGhost(.caret, false)
+                if escape != current { moveTemporarily(to: escape) }
+                dodgedFrame = escape == home ? nil : escape
+            } else {
+                setGhost(.caret, true) // nowhere to go: fade in place
+            }
+            return
+        }
+
+        // Clear where it is. Head home once the caret has stayed out of home's
+        // zone for a beat, so typing along its edge doesn't make it ping-pong.
+        let homeIsClear = caret.map { !NoteDodge.isObstructing(home, caret: $0) } ?? true
+        guard homeIsClear else {
+            homeClearSince = nil
+            return
+        }
+        let clearSince = homeClearSince ?? now
+        homeClearSince = clearSince
+        guard now - clearSince >= NoteDodge.returnDelay else { return }
+        if dodgedFrame != nil {
+            dodgedFrame = nil
+            moveTemporarily(to: home)
+        }
+        setGhost(.caret, false)
+    }
+
+    /// Drops every dodge and ghost immediately (the watcher stopped).
+    func clearDodge() {
+        setGhost(.drag, false)
+        setGhost(.peek, false)
+        endCaretDodge()
+    }
+
+    /// Puts a caret-dodging note straight back home (caret dodging turned off).
+    func endCaretDodge() {
+        setGhost(.caret, false)
+        snapHome()
+    }
+
+    private func snapHome() {
+        guard dodgedFrame != nil || temporaryMovesInFlight > 0 else { return }
+        dodgedFrame = nil
+        moveTemporarily(to: homeDisplayedFrame, duration: 0)
+    }
+
+    /// Slides the panel without changing the note's saved home. Goes through the
+    /// animator so a newer move always replaces one still in flight.
+    private func moveTemporarily(to frame: CGRect, duration: TimeInterval = 0.18) {
+        temporaryMovesInFlight += 1
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(frame, display: true)
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.temporaryMovesInFlight -= 1
+                self.panel.invalidateShadow()
+            }
+        })
     }
 
     // MARK: Menu

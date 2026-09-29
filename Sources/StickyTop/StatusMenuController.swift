@@ -62,6 +62,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         add("Gather Notes Here", action: #selector(gatherNotes))
 
         menu.addItem(.separator())
+        menu.addItem(neverInTheWayItem())
         add("Float Above Everything", action: #selector(toggleFloatAboveEverything))
             .state = manager.settings.floatAboveEverything ? .on : .off
         let login = add("Launch at Login", action: #selector(toggleLaunchAtLogin))
@@ -121,7 +122,61 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func neverInTheWayItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Never in the Way", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let settings = manager.settings
+
+        let dodge: NSMenuItem
+        if CaretTracker.isTrusted {
+            dodge = submenu.addItem(withTitle: "Dodge Text Cursor", action: #selector(toggleCaretDodge), keyEquivalent: "")
+            dodge.state = settings.dodgeCaret ? .on : .off
+            dodge.toolTip = "Notes slide off the line you're typing on in other apps, then come back."
+        } else {
+            dodge = submenu.addItem(withTitle: "Dodge Text Cursor — Allow Access…", action: #selector(toggleCaretDodge), keyEquivalent: "")
+            dodge.toolTip = "Needs Accessibility access to see where the text cursor is. StickyTop only reads the cursor position."
+            // After an update, macOS keeps showing the old grant as "on" but it no
+            // longer matches the new app, and toggling it doesn't help.
+            for line in ["Already on in System Settings? After an update,", "remove StickyTop there (−) and add it again (+)."] {
+                submenu.addItem(withTitle: line, action: nil, keyEquivalent: "").isEnabled = false
+            }
+        }
+        dodge.target = self
+
+        let drag = submenu.addItem(withTitle: "See Through While Dragging", action: #selector(toggleDragThrough), keyEquivalent: "")
+        drag.state = settings.dragThrough ? .on : .off
+        drag.target = self
+        drag.toolTip = "Files, windows and selections dragged across a note pass straight through it."
+
+        let peek = submenu.addItem(withTitle: "Hold ⌃⌥ to Peek Through", action: #selector(togglePeekThrough), keyEquivalent: "")
+        peek.state = settings.peekThrough ? .on : .off
+        peek.target = self
+        peek.toolTip = "While you hold Control-Option, every note turns see-through and clicks pass through."
+
+        item.submenu = submenu
+        return item
+    }
+
     // MARK: Actions
+
+    @objc private func toggleCaretDodge() {
+        if CaretTracker.isTrusted && manager.settings.dodgeCaret {
+            manager.dodge.disableCaretDodge()
+        } else {
+            manager.dodge.enableCaretDodge()
+        }
+    }
+
+    @objc private func toggleDragThrough() {
+        manager.settings.dragThrough.toggle()
+        manager.dodge.refresh()
+    }
+
+    @objc private func togglePeekThrough() {
+        manager.settings.peekThrough.toggle()
+        manager.dodge.refresh()
+    }
 
     @objc private func newNote() { manager.createNote() }
     @objc private func toggleVisibility() { manager.toggleVisibility() }

@@ -36,6 +36,11 @@ enum SelfTest {
 
         print("StickyTop self-test")
         let startCount = manager.notes.count
+        // Drive "never in the way" with scripted input instead of the real pointer.
+        manager.dodge.automaticTicks = false
+        manager.settings.dodgeCaret = true
+        manager.settings.dragThrough = true
+        manager.settings.peekThrough = true
 
         // Hand activation to Finder so StickyTop starts inactive — like when you're
         // working in another app and summon a note.
@@ -111,12 +116,8 @@ enum SelfTest {
             check(second.color == .blue, "new note inherits the color")
         }
         let trashBefore = manager.trash.count
-        if let blank = NSApp.windows.compactMap({ $0 as? NotePanel }).first(where: { $0.isKeyWindow }),
-           let handler = blank.keyEquivalentHandler,
-           let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
-                                        windowNumber: blank.windowNumber, context: nil, characters: "w",
-                                        charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 0) {
-            _ = handler(event)
+        if let blank = manager.visibleControllers.last, blank !== note {
+            _ = press("w", .command, in: blank)
         }
         check(manager.notes.count == startCount + 1 && manager.trash.count == trashBefore, "⌘W on a blank note discards it")
         _ = press("w", .command, in: note)
@@ -152,6 +153,9 @@ enum SelfTest {
         // (AppKit itself may hold a closed on-screen window a little longer.)
         check(weakController == nil, "deleted note's controller is freed")
 
+        // Never in the way
+        await neverInTheWay(manager: manager, keyNote: note, check: check, settle: settle)
+
         // Persistence
         manager.saveNow()
         let (onDisk, status) = NoteStore(directory: manager.store.directory).load()
@@ -164,6 +168,180 @@ enum SelfTest {
 
         print(failures == 0 ? "PASS: all self-test checks passed" : "FAIL: \(failures) check(s) failed")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    private static func neverInTheWay(
+        manager: NoteManager,
+        keyNote: NoteWindowController,
+        check: (Bool, String) -> Void,
+        settle: () async -> Void
+    ) async {
+        typealias Input = DodgeCoordinator.Input
+        let dodge = manager.dodge
+        func idle(_ mouse: CGPoint) -> Input {
+            Input(caret: nil, mouse: mouse, primaryButtonDown: false, modifiers: [])
+        }
+        func animations() async { try? await Task.sleep(nanoseconds: 400_000_000) }
+
+        // A note on the half of the screen away from the real pointer (so hover
+        // can't interfere), and not the key window (typing in it pauses dodging).
+        guard let screen = NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let pointer = NSEvent.mouseLocation
+        let homeX = pointer.x > visible.midX ? visible.minX + 80 : visible.maxX - 340
+        let home = CGRect(x: homeX, y: visible.midY - 110, width: 260, height: 220)
+        let outside = CGPoint(x: home.maxX + 200 > visible.maxX ? home.minX - 150 : home.maxX + 150, y: home.midY)
+        let note = manager.createNote()
+        note.setDisplayedFrame(home)
+        keyNote.focus()
+        await settle()
+        check(!note.panel.isKeyWindow && note.homeDisplayedFrame == home, "dodge test note placed (not key)")
+
+        // Caret lands on the note's bottom line in "another app".
+        let caret = CGRect(x: home.midX, y: home.minY + 20, width: 2, height: 18)
+        dodge.inputOverride = Input(caret: caret, mouse: outside, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 100)
+        await animations()
+        check(note.dodgedFrame != nil && !NoteDodge.isObstructing(note.panel.frame, caret: caret),
+              "note slides clear of the text cursor")
+        check(note.panel.frame.size == home.size && visible.contains(note.panel.frame), "…keeping its size and staying on screen")
+        check(note.homeDisplayedFrame == home, "…without forgetting where it lives")
+
+        // Typing continues along the same line: no bouncing.
+        let dodgedAt = note.panel.frame
+        dodge.inputOverride?.caret = caret.offsetBy(dx: 40, dy: 0)
+        dodge.tick(now: 100.3)
+        await animations()
+        check(note.panel.frame == dodgedAt, "stays put while you keep typing on that line")
+
+        // Caret hops just outside home's zone and back (typing along its edge): no ping-pong.
+        dodge.inputOverride?.caret = CGRect(x: home.midX, y: home.minY - 60, width: 2, height: 18)
+        dodge.tick(now: 100.5)
+        dodge.inputOverride?.caret = caret
+        dodge.tick(now: 100.6)
+        await animations()
+        check(note.panel.frame == dodgedAt, "a brief hop out of the zone doesn't send it home and back")
+
+        // Caret leaves: wait a beat, then go home.
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 100.8)
+        dodge.tick(now: 101.5)
+        check(note.dodgedFrame != nil, "waits a full second after the cursor leaves before returning")
+        dodge.tick(now: 101.9)
+        await animations()
+        check(note.dodgedFrame == nil && note.panel.frame == home, "returns home once the cursor is gone")
+        manager.saveNow()
+        let saved = NoteStore(directory: manager.store.directory).load().document.notes.first { $0.id == note.id }
+        check(saved?.frame == home, "temporary dodges are never saved as the note's position")
+
+        // User drags the note while it's dodged: that spot becomes home.
+        dodge.inputOverride = Input(caret: caret, mouse: outside, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 110)
+        await animations()
+        let userSpot = CGPoint(x: home.minX, y: home.minY - 40)
+        note.panel.setFrameOrigin(userSpot)
+        await settle()
+        check(note.dodgedFrame == nil && note.homeDisplayedFrame.origin == userSpot, "moving a dodged note by hand makes it the new home")
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 120)
+        note.setDisplayedFrame(home)
+
+        // Pointer actively on the note: leave it be. Parked pointer: dodge anyway.
+        let onNote = CGPoint(x: home.midX, y: home.maxY - 40)
+        dodge.inputOverride = Input(caret: nil, mouse: onNote.applying(.init(translationX: -5, y: 0)), primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 124)
+        dodge.inputOverride = Input(caret: caret, mouse: onNote, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 124.1)
+        await animations()
+        check(note.dodgedFrame == nil, "a note you're pointing at (pointer just moved) isn't pulled away")
+        dodge.tick(now: 126)
+        await animations()
+        check(note.dodgedFrame != nil, "a pointer merely parked on the note doesn't block dodging")
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 128)
+        await animations()
+        note.setDisplayedFrame(home)
+
+        // No room to escape (note fills the screen): fade in place instead.
+        note.setDisplayedFrame(visible)
+        dodge.inputOverride = Input(caret: CGRect(x: visible.midX, y: visible.midY, width: 2, height: 18),
+                                    mouse: outside, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 130)
+        await animations()
+        check(note.isGhosted && note.panel.alphaValue < 0.2 && note.panel.ignoresMouseEvents,
+              "a note too big to move fades out of the way instead")
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 131.5)
+        dodge.tick(now: 132.6)
+        await animations()
+        check(!note.isGhosted && note.panel.alphaValue > 0.9 && !note.panel.ignoresMouseEvents, "…and comes back when the cursor leaves")
+        note.setDisplayedFrame(home)
+
+        // Dragging something from another app across the note.
+        dodge.mouseDown(at: outside, onNote: false)
+        dodge.inputOverride = Input(caret: nil, mouse: CGPoint(x: home.midX, y: home.midY), primaryButtonDown: true, modifiers: [])
+        dodge.tick(now: 140)
+        check(note.isGhosted && note.panel.ignoresMouseEvents, "a drag from elsewhere passes through the note")
+        dodge.inputOverride?.mouse = outside
+        dodge.tick(now: 140.1)
+        check(!note.isGhosted, "…which turns solid again once the drag moves on")
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 140.2)
+
+        // Dragging inside the note (selecting its text) must not ghost it.
+        dodge.mouseDown(at: CGPoint(x: home.midX, y: home.midY), onNote: true)
+        dodge.inputOverride = Input(caret: nil, mouse: CGPoint(x: home.midX, y: home.midY), primaryButtonDown: true, modifiers: [])
+        dodge.tick(now: 150)
+        check(!note.isGhosted, "dragging within a note keeps it solid")
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 150.1)
+
+        // Hold ⌃⌥ to peek through every note.
+        dodge.inputOverride = Input(caret: nil, mouse: outside, primaryButtonDown: false, modifiers: [.control, .option])
+        dodge.tick(now: 160)
+        check(!note.isGhosted, "a quick ⌃⌥ tap (e.g. a hotkey) doesn't flicker notes")
+        dodge.tick(now: 160.35)
+        check(manager.visibleControllers.allSatisfy { $0.isGhosted && $0.panel.ignoresMouseEvents }, "holding ⌃⌥ makes every note see-through and click-through")
+        dodge.inputOverride?.modifiers = []
+        dodge.tick(now: 160.4)
+        check(manager.visibleControllers.allSatisfy { !$0.isGhosted && !$0.panel.ignoresMouseEvents }, "releasing ⌃⌥ brings them back")
+        dodge.inputOverride?.modifiers = [.control, .option, .command]
+        dodge.tick(now: 161)
+        dodge.tick(now: 162)
+        check(!note.isGhosted, "⌃⌥⌘ (other shortcuts) doesn't peek")
+
+        // Lock (click-through) survives a peek.
+        manager.setClickThrough(true)
+        dodge.inputOverride?.modifiers = [.control, .option]
+        dodge.tick(now: 170)
+        dodge.tick(now: 170.5)
+        dodge.inputOverride?.modifiers = []
+        dodge.tick(now: 170.6)
+        check(note.panel.ignoresMouseEvents && !note.isGhosted, "locked notes stay click-through after a peek")
+        manager.setClickThrough(false)
+        check(!note.panel.ignoresMouseEvents, "unlocking restores clicks")
+
+        // Turning the feature off mid-slide still lands the note at home.
+        dodge.inputOverride = Input(caret: caret, mouse: outside, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 175)
+        dodge.disableCaretDodge() // while the 0.18 s slide is still running
+        await animations()
+        check(note.panel.frame == home, "switching off mid-slide still lands the note at home")
+        manager.settings.dodgeCaret = true
+        dodge.inputOverride = idle(outside)
+        dodge.tick(now: 177)
+
+        // Turning the feature off drops any dodge immediately.
+        dodge.inputOverride = Input(caret: caret, mouse: outside, primaryButtonDown: false, modifiers: [])
+        dodge.tick(now: 180)
+        await animations()
+        check(note.dodgedFrame != nil, "(dodged before disabling)")
+        dodge.disableCaretDodge()
+        check(note.dodgedFrame == nil && note.panel.frame == home, "turning Dodge Text Cursor off puts notes straight back")
+        manager.settings.dodgeCaret = true
+
+        dodge.inputOverride = nil
+        note.delete()
     }
 }
 #endif

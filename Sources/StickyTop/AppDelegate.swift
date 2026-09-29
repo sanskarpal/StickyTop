@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusMenu = StatusMenuController(manager: manager)
         manager.onStateChange = { [weak self] in self?.statusMenu.updateIcon() }
+        manager.dodge.start()
         if !isScratchInstance { registerHotKeys() }
         observeSystem()
     }
